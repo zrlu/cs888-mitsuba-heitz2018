@@ -421,6 +421,104 @@ public:
         return std::abs(prob * dwh_dwo);
     }
 
+	inline Spectrum sample2018(BSDFSamplingRecord &bRec, const Point2 &_sample) const {
+		return Spectrum(0.0f);
+	}
+
+	inline Spectrum sample2018(BSDFSamplingRecord &bRec, Float &pdf, const Point2 &_sample) const {
+
+		Point2 sample(_sample);
+
+		bool hasReflection = ((bRec.component == -1 || bRec.component == 0)
+			&& (bRec.typeMask & EGlossyReflection)),
+			hasTransmission = ((bRec.component == -1 || bRec.component == 1)
+				&& (bRec.typeMask & EGlossyTransmission)),
+			sampleReflection = hasReflection;
+
+		if (!hasReflection && !hasTransmission)
+			return Spectrum(0.0f);
+
+		/* Construct the microfacet distribution matching the
+		   roughness values at the current surface position. */
+		MicrofacetDistribution distr(
+			m_type,
+			m_alphaU->eval(bRec.its).average(),
+			m_alphaV->eval(bRec.its).average(),
+			m_sampleVisible
+		);
+
+        /* Sample M, the microfacet normal */
+        Float microfacetPDF;
+        const Normal m = distr.sample(math::signum(Frame::cosTheta(bRec.wi)) * bRec.wi, sample, microfacetPDF);
+        if (microfacetPDF == 0)
+            return Spectrum(0.0f);
+        pdf = microfacetPDF;
+
+        Float cosThetaT;
+        Float F = fresnelDielectricExt(dot(bRec.wi, m), cosThetaT, m_eta);
+
+        Spectrum weight(1.0f);
+
+        if (hasReflection && hasTransmission) {
+            if (bRec.sampler->next1D() > F) {
+                sampleReflection = false;
+                pdf *= 1-F;
+            } else {
+                pdf *= F;
+            }
+        } else {
+            weight *= hasReflection ? F : (1-F);
+        }
+
+        Float dwh_dwo;
+        if (sampleReflection) {
+            /* Perfect specular reflection based on the microfacet normal */
+            bRec.wo = reflect(bRec.wi, m);
+            bRec.eta = 1.0f;
+            bRec.sampledComponent = 0;
+            bRec.sampledType = EGlossyReflection;
+
+            /* Side check */
+            if (Frame::cosTheta(bRec.wi) * Frame::cosTheta(bRec.wo) <= 0)
+                return Spectrum(0.0f);
+
+            weight *= m_specularReflectance->eval(bRec.its);
+
+            /* Jacobian of the half-direction mapping */
+            dwh_dwo = 1.0f / (4.0f * dot(bRec.wo, m));
+        } else {
+            if (cosThetaT == 0)
+                return Spectrum(0.0f);
+
+            /* Perfect specular transmission based on the microfacet normal */
+            bRec.wo = refract(bRec.wi, m, m_eta, cosThetaT);
+            bRec.eta = cosThetaT < 0 ? m_eta : m_invEta;
+            bRec.sampledComponent = 1;
+            bRec.sampledType = EGlossyTransmission;
+
+            /* Side check */
+            if (Frame::cosTheta(bRec.wi) * Frame::cosTheta(bRec.wo) >= 0)
+                return Spectrum(0.0f);
+
+            /* Radiance must be scaled to account for the solid angle compression
+               that occurs when crossing the interface. */
+            Float factor = (bRec.mode == ERadiance)
+                ? (cosThetaT < 0 ? m_invEta : m_eta) : 1.0f;
+
+            weight *= m_specularTransmittance->eval(bRec.its) * (factor * factor);
+
+            /* Jacobian of the half-direction mapping */
+            Float sqrtDenom = dot(bRec.wi, m) + bRec.eta * dot(bRec.wo, m);
+            dwh_dwo = (bRec.eta*bRec.eta * dot(bRec.wo, m)) / (sqrtDenom*sqrtDenom);
+        }
+
+		weight *= distr.smithG1(bRec.wo, m);
+
+        pdf *= std::abs(dwh_dwo);
+
+        return weight;
+	}
+
     Spectrum sample(BSDFSamplingRecord &bRec, const Point2 &_sample) const {
         Point2 sample(_sample);
 
@@ -452,7 +550,8 @@ public:
 
         /* Sample M, the microfacet normal */
         Float microfacetPDF;
-        const Normal m = sampleDistr.sample(math::signum(Frame::cosTheta(bRec.wi)) * bRec.wi, sample, microfacetPDF);
+        const Normal m = sampleDistr.sample(math::signum(Frame::cosTheta(bRec.wi)) * bRec.wi, sample);
+		microfacetPDF = distr.VNDF2018(bRec.wi, m);
         if (microfacetPDF == 0)
             return Spectrum(0.0f);
 
@@ -466,7 +565,7 @@ public:
         } else {
             weight = Spectrum(hasReflection ? F : (1-F));
         }
-
+        
         if (sampleReflection) {
             /* Perfect specular reflection based on the microfacet normal */
             bRec.wo = reflect(bRec.wi, m);
@@ -511,6 +610,12 @@ public:
     }
 
     Spectrum sample(BSDFSamplingRecord &bRec, Float &pdf, const Point2 &_sample) const {
+
+		if (m_type == MicrofacetDistribution::EGGX2018)
+		{
+			return sample2018(bRec, pdf, _sample);
+		}
+
         Point2 sample(_sample);
 
         bool hasReflection = ((bRec.component == -1 || bRec.component == 0)

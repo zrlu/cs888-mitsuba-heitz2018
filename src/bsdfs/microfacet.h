@@ -53,7 +53,9 @@ public:
         EGGX              = 1,
 
         /// Phong distribution (with the anisotropic extension by Ashikhmin and Shirley)
-        EPhong            = 2
+        EPhong            = 2,
+
+		EGGX2018          = 3
     };
 
     /**
@@ -103,12 +105,14 @@ public:
 
         if (props.hasProperty("distribution")) {
             std::string distr = boost::to_lower_copy(props.getString("distribution"));
-            if (distr == "beckmann")
-                m_type = EBeckmann;
-            else if (distr == "ggx")
-                m_type = EGGX;
-            else if (distr == "phong" || distr == "as")
-                m_type = EPhong;
+			if (distr == "beckmann")
+				m_type = EBeckmann;
+			else if (distr == "ggx")
+				m_type = EGGX;
+			else if (distr == "phong" || distr == "as")
+				m_type = EPhong;
+			else if (distr == "ggx2018")
+				m_type = EGGX2018;
             else
                 SLog(EError, "Specified an invalid distribution \"%s\", must be "
                     "\"beckmann\", \"ggx\", or \"phong\"/\"as\"!", distr.c_str());
@@ -205,6 +209,7 @@ public:
                 }
                 break;
 
+			case EGGX2018:
             case EGGX: {
                     /* GGX / Trowbridge-Reitz distribution function for rough surfaces */
                     Float root = ((Float) 1 + beckmannExponent) * cosTheta2;
@@ -233,19 +238,53 @@ public:
         return result;
     }
 
+	inline Float GGXDistribution2018(const Vector &m) const {
+
+		Float s = m.x*m.x / (m_alphaU*m_alphaU) + m.y*m.y / (m_alphaV*m_alphaV) + m.z*m.z;
+		return 1.0f / (M_PI * m_alphaU*m_alphaV * s*s); 
+	}
+
+	inline Float VNDF2018(const Vector &wi, const Vector &m) const {
+		return smithG1(wi, m) * absDot(wi, m) * GGXDistribution2018(m) / std::abs(Frame::cosTheta(wi));
+	}
+
+	inline Normal sampleGGXVNDF2018(const Vector3 &_wi, const Point2 &sample) const {
+		Vector3 Vh = normalize(Vector3(m_alphaU*_wi.x, m_alphaV*_wi.y, _wi.z));
+		Float lensq = Vh.x*Vh.x + Vh.y*Vh.y;
+		Vector3 T1 = lensq > 0 ? Vector3(-Vh.y, Vh.x, 0)* 1.0f / std::sqrt(lensq) : Vector3(1, 0, 0);
+		Vector3 T2 = mitsuba::cross(Vh, T1);
+		Float r = std::sqrt(sample.x);
+		Float phi = 2.0f * M_PI * sample.y;
+		Float t1 = r * std::cos(phi);
+		Float t2 = r * std::sin(phi);
+		Float s = 0.5f * (1.0f + Vh.z);
+		t2 = (1.0f - s) * std::sqrt(1.0f - t1 * t1) + s * t2;
+		Vector3 Nh = T1 * t1 + T2 * t2 + Vh * std::sqrt(std::max(0.0f, 1.0f - t1 * t1 - t2 * t2));
+		Vector3 Ne = normalize(Vector3(m_alphaU*Nh.x, m_alphaV*Nh.y, std::max<Float>(0.0, Nh.z)));
+		return Ne;
+	}
+
     /**
      * \brief Wrapper function which calls \ref sampleAll() or \ref sampleVisible()
      * depending on the parameters of this class
      */
     inline Normal sample(const Vector &wi, const Point2 &sample, Float &pdf) const {
         Normal m;
-        if (m_sampleVisible) {
-            m = sampleVisible(wi, sample);
-            pdf = pdfVisible(wi, m);
-        } else {
-            m = sampleAll(sample, pdf);
-        }
-        return m;
+		if (m_type == EGGX2018) {
+			m = sampleGGXVNDF2018(wi, sample);
+			pdf = VNDF2018(wi, m);
+			return m;
+		}
+		else {
+			if (m_sampleVisible) {
+				m = sampleVisible(wi, sample);
+				pdf = pdfVisible(wi, m);
+			}
+			else {
+				m = sampleAll(sample, pdf);
+			}
+			return m;
+		}
     }
 
     /**
@@ -254,13 +293,20 @@ public:
      */
     inline Normal sample(const Vector &wi, const Point2 &sample) const {
         Normal m;
-        if (m_sampleVisible) {
-            m = sampleVisible(wi, sample);
-        } else {
-            Float pdf;
-            m = sampleAll(sample, pdf);
-        }
-        return m;
+		if (m_type == EGGX2018) {
+			m = sampleGGXVNDF2018(wi, sample);
+			return m;
+		}
+		else {
+			if (m_sampleVisible) {
+				m = sampleVisible(wi, sample);
+			}
+			else {
+				Float pdf;
+				m = sampleAll(sample, pdf);
+			}
+			return m;
+		}
     }
 
     /**
@@ -318,6 +364,7 @@ public:
                 }
                 break;
 
+			case EGGX2018:
             case EGGX: {
                     /* GGX / Trowbridge-Reitz distribution function for rough surfaces */
                     if (isIsotropic()) {
@@ -501,6 +548,7 @@ public:
                 }
                 break;
 
+			case EGGX2018:
             case EGGX: {
                     Float root = alpha * tanTheta;
                     return 2.0f / (1.0f + math::hypot2((Float) 1.0f, root));
@@ -527,6 +575,7 @@ public:
             case EBeckmann: return "beckmann"; break;
             case EGGX: return "ggx"; break;
             case EPhong: return "phong"; break;
+			case EGGX2018: return "ggx2018"; break;
             default: return "invalid"; break;
         }
     }
@@ -642,7 +691,8 @@ protected:
                     slope.y = math::erfinv(2.0f*std::max(sample.y, (Float) 1e-6f) - 1.0f);
                 };
                 break;
-
+                
+			case EGGX2018:
             case EGGX: {
                     /* Special case (normal incidence) */
                     if (thetaI < 1e-4f) {

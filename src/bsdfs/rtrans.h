@@ -85,6 +85,7 @@ public:
             case MicrofacetDistribution::EBeckmann: name = "beckmann"; break;
             case MicrofacetDistribution::EPhong: name = "phong"; break;
             case MicrofacetDistribution::EGGX: name = "ggx"; break;
+			case MicrofacetDistribution::EGGX2018: name = "ggx2018"; break;
             default:
                 SLog(EError, "RoughTransmittance: unsupported distribution type!");
         }
